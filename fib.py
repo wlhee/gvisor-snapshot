@@ -1,4 +1,5 @@
 import time
+import sys
 
 def fib(n):
     if n < 0:
@@ -10,9 +11,22 @@ def fib(n):
     else:
         return fib(n-1) + fib(n-2)
 
+def check_gvisor():
+    try:
+        with open('/proc/version', 'r') as f:
+            if 'gvisor' in f.read():
+                return "Running on gVisor"
+    except FileNotFoundError:
+        pass
+    return "Not running on gVisor"
+
 if __name__ == "__main__":
+    gvisor_status = check_gvisor()
+    print(f"gVisor status: {gvisor_status}", flush=True)
+
     i = 0
     while True:
-        print(f"fib({i}) = {fib(i)}")
+        output = f"fib({i}) = {fib(i)}"
+        print(output, flush=True)
         i += 1
         time.sleep(5)
