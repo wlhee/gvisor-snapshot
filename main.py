@@ -3,6 +3,7 @@ import subprocess
 import os
 import threading
 import queue
+import json
 
 PORT = 8080
 CONTAINER_ID = "fib-container"
@@ -34,6 +35,8 @@ class MyServer(BaseHTTPRequestHandler):
             self.get_status()
         elif self.path == '/logs':
             self.get_logs()
+        elif self.path == '/list':
+            self.list_containers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -47,11 +50,40 @@ class MyServer(BaseHTTPRequestHandler):
             self.wfile.write(b"App already running")
             return
 
+        bundle_dir = "/runsc_bundle"
+        os.makedirs(bundle_dir, exist_ok=True)
+
+        config = {
+            "ociVersion": "1.0.0",
+            "process": {
+                "args": ["python3", "fib.py"],
+                "cwd": "/",
+                "env": [f"{k}={v}" for k, v in os.environ.items() if k not in ["HOSTNAME", "HOME"]],
+            },
+            "root": {
+                "path": "/",
+                "readonly": True
+            },
+            "mounts": [
+                {
+                    "destination": "/proc",
+                    "type": "proc",
+                    "source": "proc"
+                }
+            ]
+        }
+        with open(os.path.join(bundle_dir, "config.json"), "w") as f:
+            json.dump(config, f, indent=4)
+
         try:
-            runsc_cmd = ["runsc", "--network=host", "do", "python3", "fib.py"]
-            process = subprocess.Popen(runsc_cmd, preexec_fn=os.setsid, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            
-            # Start a thread to read the output from the process
+            # Create the container
+            create_cmd = ["runsc", "create", "--bundle", bundle_dir, CONTAINER_ID]
+            subprocess.run(create_cmd, check=True)
+
+            # Start the container
+            start_cmd = ["runsc", "start", CONTAINER_ID]
+            process = subprocess.Popen(start_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
             t = threading.Thread(target=reader_thread, args=(process.stdout,))
             t.daemon = True
             t.start()
@@ -73,7 +105,14 @@ class MyServer(BaseHTTPRequestHandler):
             return
 
         try:
-            os.killpg(os.getpgid(process.pid), subprocess.signal.SIGTERM)
+            # Kill the container process
+            kill_cmd = ["runsc", "kill", CONTAINER_ID, "SIGKILL"]
+            subprocess.run(kill_cmd, check=False)
+
+            # Delete the container
+            delete_cmd = ["runsc", "delete", CONTAINER_ID]
+            subprocess.run(delete_cmd, check=False)
+
             process = None
             self.send_response(200)
             self.end_headers()
@@ -120,6 +159,18 @@ class MyServer(BaseHTTPRequestHandler):
         self.end_headers()
         while not log_queue.empty():
             self.wfile.write(log_queue.get().encode())
+
+    def list_containers(self):
+        try:
+            result = subprocess.run(["runsc", "list"], check=True, capture_output=True, text=True)
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(result.stdout.encode())
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
 
 if __name__ == "__main__":
     with HTTPServer(("", PORT), MyServer) as httpd:
