@@ -4,6 +4,7 @@ import os
 import threading
 import queue
 import json
+import uuid
 
 PORT = 8080
 CONTAINER_ID = "fib-container"
@@ -171,6 +172,70 @@ class MyServer(BaseHTTPRequestHandler):
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode())
+
+    def do_POST(self):
+        if self.path == '/execute':
+            self.execute_code()
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
+
+    def execute_code(self):
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        
+        temp_dir = "/tmp"
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        temp_filename = f"temp_code-{uuid.uuid4()}.py"
+        temp_filepath = os.path.join(temp_dir, temp_filename)
+        
+        with open(temp_filepath, "wb") as f:
+            f.write(post_data)
+            
+        container_id = f"exec-{uuid.uuid4()}"
+        bundle_dir = f"/tmp/runsc_bundle_{container_id}"
+        os.makedirs(bundle_dir, exist_ok=True)
+
+        config = {
+            "ociVersion": "1.0.0",
+            "process": {
+                "args": ["python3", temp_filepath],
+                "cwd": "/",
+                "env": [f"{k}={v}" for k, v in os.environ.items() if k not in ["HOSTNAME", "HOME"]],
+            },
+            "root": {
+                "path": "/",
+                "readonly": False 
+            }
+        }
+        with open(os.path.join(bundle_dir, "config.json"), "w") as f:
+            json.dump(config, f, indent=4)
+
+        try:
+            run_cmd = ["runsc", "--network=host", "run", "-bundle", bundle_dir, container_id]
+            result = subprocess.run(run_cmd, capture_output=True, text=True, check=True)
+            
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(result.stdout.encode())
+            if result.stderr:
+                self.wfile.write(b"\n--- STDERR ---\\n")
+                self.wfile.write(result.stderr.encode())
+
+        except subprocess.CalledProcessError as e:
+            self.send_response(500)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Execution failed:\n")
+            self.wfile.write(e.stdout.encode())
+            self.wfile.write(e.stderr.encode())
+        finally:
+            # Cleanup
+            if os.path.exists(temp_filepath):
+                os.remove(temp_filepath)
 
 if __name__ == "__main__":
     with HTTPServer(("", PORT), MyServer) as httpd:
